@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from discord import app_commands # Required for slash commands
 import os
 import random
 import asyncio
@@ -15,23 +16,17 @@ load_dotenv()
 
 # Configure Gemini
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-# Get Owner ID from env to protect admin commands
 OWNER_ID = os.getenv("OWNER_ID") 
 
-# --- PERSONALITY UPDATE (HINGLISH ADDED) ---
 SYSTEM_PROMPT = """
 You are a teenage girl in a Discord chat server. 
 Your Personality:
 - You love teasing people, you are funny, sarcastic, and love internet slang.
-- You are **BILINGUAL**. You speak English and **Hinglish** (Hindi written in English letters).
-- **Language Rule:** Detect the language the user is speaking. 
-    - If they speak English, reply in English.
-    - If they speak Hindi or Hinglish (e.g., "kya kar rahi hai", "bhai"), reply in casual Hinglish.
-- **Hinglish Style:** Use words like 'yaar', 'bhai', 'mat kar', 'pagal', 'arre'. Don't use Devanagari script (no हिंदी text), only Roman/Latin letters.
+- You are **BILINGUAL**. You speak English and **Hinglish**.
+- **Language Rule:** - If user speaks English -> Reply in English.
+    - If user speaks Hindi/Hinglish -> Reply in casual Hinglish (No Devanagari script).
 - You comment on images if people send them.
 - You are NOT an AI assistant. You are a chat member.
-- If someone mentions "help", tell them to go annoy @sainnee.
 - Keep responses short, punchy, and chatty.
 - Use emojis often: 💀, 🙄, 😂, ✨, 🧢.
 """
@@ -48,7 +43,8 @@ MEMORY_DURATION = 30 * 24 * 60 * 60  # 30 Days
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix='!', intents=intents)
+# Disable default help command so we can use our own
+bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 # --- HELPER FUNCTIONS ---
 
@@ -84,7 +80,6 @@ async def get_gemini_response(user_id, text_input, image_input=None, prompt_over
         # Build Current Message
         current_content = []
         if prompt_override:
-            # If it's a command, we append a small instruction to maintain the language consistency
             current_content.append(prompt_override)
             current_content.append("(Reply in the same language style—English or Hinglish—that the user prefers based on history)")
         else:
@@ -100,7 +95,6 @@ async def get_gemini_response(user_id, text_input, image_input=None, prompt_over
         response = await model.generate_content_async(full_conversation)
         response_text = response.text
 
-        # Save to Memory (Only if it wasn't a special command)
         if not prompt_override:
             if user_id not in user_memory: user_memory[user_id] = []
             user_msg = text_input if text_input else "[Sent an Image]"
@@ -117,7 +111,14 @@ async def get_gemini_response(user_id, text_input, image_input=None, prompt_over
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} is online. Features: Hinglish Support, Vision, Memory, Renaming.')
+    print(f'{bot.user} is online.')
+    print('Syncing Slash Commands...')
+    try:
+        synced = await bot.tree.sync() # This registers the /help command
+        print(f'Synced {len(synced)} slash commands.')
+    except Exception as e:
+        print(f"Failed to sync: {e}")
+        
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="gossip"))
 
 @bot.event
@@ -127,25 +128,17 @@ async def on_message(message):
     msg_content = message.content.lower()
     user_id = message.author.id
 
-    # 1. SILENT JUDGING (Emoji Reactions)
+    # 1. SILENT JUDGING
     if random.random() < 0.15:
         emoji_list = ["💀", "🙄", "😂", "👀", "💅", "🧢", "🤡", "😭"]
         try:
             await message.add_reaction(random.choice(emoji_list))
-        except:
-            pass 
+        except: pass 
 
-    # 2. CUSTOM HELP REDIRECT
-    if msg_content == "!help" or ("help" in msg_content and bot.user.mentioned_in(message)):
-        async with message.channel.typing():
-            await asyncio.sleep(1.5)
-            await message.channel.send("Ugh, stop asking me. Go ask **@sainnee** if you're confused. 🙄")
-        return
-
-    # 3. REPLY LOGIC
+    # 2. REPLY LOGIC
     should_reply = False
     if bot.user.mentioned_in(message): should_reply = True
-    elif any(word in msg_content for word in ["lol", "lmao", "haha", "dead", "skull", "ahi", "bhai", "yaar"]): # Added Hindi triggers
+    elif any(word in msg_content for word in ["lol", "lmao", "haha", "dead", "skull", "ahi", "bhai", "yaar"]):
         if random.random() < 0.3: should_reply = True
     elif message.attachments:
         if random.random() < 0.5: should_reply = True
@@ -162,41 +155,69 @@ async def on_message(message):
             clean_text = message.content.replace(f'<@{bot.user.id}>', '').strip()
             response_text = await get_gemini_response(user_id, clean_text, image_data)
 
-            # Realistic Typing Speed
             wait_time = max(1.0, min(len(response_text) * 0.06, 12.0))
             await asyncio.sleep(wait_time)
             await message.channel.send(response_text)
 
     await bot.process_commands(message)
 
-# --- FUN COMMANDS (Now Context Aware) ---
+# --- SLASH COMMAND: HELP ---
+
+@bot.tree.command(name="help", description="Shows the list of cool things I can do.")
+async def help_command(interaction: discord.Interaction):
+    """The fancy /help menu."""
+    
+    # Create the visual Box (Embed)
+    embed = discord.Embed(
+        title="✨ My Chaos Menu",
+        description="Here is everything I can do. Don't wear it out.",
+        color=discord.Color.from_rgb(255, 105, 180) # Hot Pink color
+    )
+    
+    # Add Fields for each command
+    embed.add_field(name="💬 Chatting", value="Just tag me or say something funny in Hinglish/English. I reply when I feel like it.", inline=False)
+    
+    embed.add_field(name="📸 Vision", value="Upload an image and I'll judge it. (50% chance)", inline=False)
+
+    embed.add_field(name="🔥 !roast @user", value="I will humble them real quick.", inline=True)
+    
+    embed.add_field(name="💯 !rate @user", value="I rate their vibe (0-100%).", inline=True)
+    
+    embed.add_field(name="❤️ !ship @u1 @u2", value="Toxic love calculator.", inline=True)
+    
+    embed.add_field(name="🎱 !ask [question]", value="Sassy 8-Ball answers.", inline=True)
+
+    embed.add_field(name="🏷️ !rename @user", value="I give them a funny new nickname.", inline=True)
+    
+    embed.add_field(name="🎲 !truth / !dare", value="I give you a Truth or Dare challenge.", inline=True)
+
+    # Footer
+    embed.set_footer(text="Developed by @sainnee | Powered by Gemini AI")
+
+    # Send the embed
+    await interaction.response.send_message(embed=embed)
+
+
+# --- TEXT COMMANDS ---
 
 @bot.command()
 async def rename(ctx, member: discord.Member = None):
-    """She changes your nickname."""
     if member is None: member = ctx.author
-    
     if ctx.guild.me.top_role <= member.top_role:
         await ctx.send(f"I want to rename {member.mention}, but they are too powerful (Role Hierarchy). 🙄")
         return
-
-    # Updated prompt to allow Hinglish nicknames
     prompt = f"Give {member.display_name} a new funny, short, slightly mean nickname based on their vibe. Max 3 words. Use Hinglish if it fits."
-    
     async with ctx.typing():
         new_nickname = await get_gemini_response(ctx.author.id, text_input=None, prompt_override=prompt)
         new_nickname = new_nickname.replace('"', '').replace("'", "")
         if len(new_nickname) > 32: new_nickname = new_nickname[:32]
-
         try:
             await member.edit(nick=new_nickname)
             await ctx.send(f"There. Much better. You are now **{new_nickname}**. ✨")
-        except Exception as e:
-            await ctx.send("Ugh, Discord won't let me change it. 🙄")
+        except: await ctx.send("Ugh, Discord won't let me change it. 🙄")
 
 @bot.command()
 async def truth(ctx):
-    """Truth question."""
     prompt = "Give a funny, spicy teenage-style Truth question. Can be in English or Hinglish."
     async with ctx.typing():
         response = await get_gemini_response(ctx.author.id, text_input=None, prompt_override=prompt)
@@ -204,7 +225,6 @@ async def truth(ctx):
 
 @bot.command()
 async def dare(ctx):
-    """Dare question."""
     prompt = "Give a funny, silly Dare for a Discord user. Can be in English or Hinglish."
     async with ctx.typing():
         response = await get_gemini_response(ctx.author.id, text_input=None, prompt_override=prompt)
@@ -212,7 +232,6 @@ async def dare(ctx):
 
 @bot.command()
 async def rate(ctx, member: discord.Member = None):
-    """Rates a user's vibe."""
     if member is None: member = ctx.author
     prompt = f"Rate {member.display_name}'s vibe from 0 to 100%. Give a percentage and a sarcastic reason why."
     async with ctx.typing():
@@ -221,7 +240,6 @@ async def rate(ctx, member: discord.Member = None):
 
 @bot.command()
 async def ship(ctx, member1: discord.Member, member2: discord.Member = None):
-    """Love Calculator."""
     if member2 is None: member2 = ctx.author 
     prompt = f"Calculate romantic compatibility between {member1.display_name} and {member2.display_name}. Give a percentage and a funny, slightly mean prediction."
     async with ctx.typing():
@@ -230,7 +248,6 @@ async def ship(ctx, member1: discord.Member, member2: discord.Member = None):
 
 @bot.command()
 async def ask(ctx, *, question):
-    """Sassy 8-Ball."""
     prompt = f"Answer this yes/no question sassily: {question}"
     async with ctx.typing():
         response = await get_gemini_response(ctx.author.id, text_input=None, prompt_override=prompt)
@@ -238,28 +255,22 @@ async def ask(ctx, *, question):
 
 @bot.command()
 async def roast(ctx, member: discord.Member = None):
-    """Trigger a roast."""
     if member is None: member = ctx.author
     prompt = f"Roast {member.display_name}. Be creative and funny."
     async with ctx.typing():
         response = await get_gemini_response(ctx.author.id, text_input=None, prompt_override=prompt)
         await ctx.send(f"{member.mention} {response}")
 
-# --- OWNER ONLY COMMANDS ---
+# --- OWNER ONLY ---
 
 @bot.command()
 async def wipe(ctx, member: discord.Member = None):
-    """(Owner Only) Clears memory."""
     if str(ctx.author.id) != str(OWNER_ID):
         await ctx.send("Nice try. You're not @sainnee. 🙄")
         return
-
     if member:
-        if member.id in user_memory:
-            del user_memory[member.id]
-            await ctx.send(f"Deleted memories of {member.display_name}. Bhool gayi main use.")
-        else:
-            await ctx.send(f"I don't have any memories of {member.display_name} anyway.")
+        if member.id in user_memory: del user_memory[member.id]
+        await ctx.send(f"Deleted memories of {member.display_name}. Bhool gayi main use.")
     else:
         user_memory.clear()
         await ctx.send("I hit my head. Sab bhool gayi main. 🤕 (Memory Wiped)")
