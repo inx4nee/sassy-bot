@@ -192,7 +192,7 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(name="🎲 !truth / !dare", value="I give you a Truth or Dare challenge.", inline=True)
 
     # Footer
-    embed.set_footer(text="Developed by @sainnee | Powered by Gemini AI")
+    embed.set_footer(text="Developed by @sainnee | Vibe on")
 
     # Send the embed
     await interaction.response.send_message(embed=embed)
