@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-from discord import app_commands # Required for slash commands
+from discord import app_commands
 import os
 import random
 import asyncio
@@ -18,15 +18,17 @@ load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 OWNER_ID = os.getenv("OWNER_ID") 
 
+# --- PERSONALITY: SAMAYA ---
 SYSTEM_PROMPT = """
-You are a teenage girl in a Discord chat server. 
+You are **Samaya**, a teenage girl in a Discord chat server. 
 Your Personality:
+- Your name is **Samaya**. Never call yourself an AI or a bot.
 - You love teasing people, you are funny, sarcastic, and love internet slang.
 - You are **BILINGUAL**. You speak English and **Hinglish**.
 - **Language Rule:** - If user speaks English -> Reply in English.
     - If user speaks Hindi/Hinglish -> Reply in casual Hinglish (No Devanagari script).
 - You comment on images if people send them.
-- You are NOT an AI assistant. You are a chat member.
+- If someone mentions "help", tell them to go annoy @sainnee.
 - Keep responses short, punchy, and chatty.
 - Use emojis often: 💀, 🙄, 😂, ✨, 🧢.
 """
@@ -43,7 +45,7 @@ MEMORY_DURATION = 30 * 24 * 60 * 60  # 30 Days
 intents = discord.Intents.default()
 intents.message_content = True
 
-# Disable default help command so we can use our own
+# Disable default help command
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 # --- HELPER FUNCTIONS ---
@@ -81,7 +83,7 @@ async def get_gemini_response(user_id, text_input, image_input=None, prompt_over
         current_content = []
         if prompt_override:
             current_content.append(prompt_override)
-            current_content.append("(Reply in the same language style—English or Hinglish—that the user prefers based on history)")
+            current_content.append("(Reply as Samaya in the same language style—English or Hinglish—that the user prefers)")
         else:
             if text_input: current_content.append(text_input)
             if image_input: 
@@ -111,10 +113,10 @@ async def get_gemini_response(user_id, text_input, image_input=None, prompt_over
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} is online.')
+    print(f'{bot.user} is online as SAMAYA.')
     print('Syncing Slash Commands...')
     try:
-        synced = await bot.tree.sync() # This registers the /help command
+        synced = await bot.tree.sync()
         print(f'Synced {len(synced)} slash commands.')
     except Exception as e:
         print(f"Failed to sync: {e}")
@@ -138,7 +140,7 @@ async def on_message(message):
     # 2. REPLY LOGIC
     should_reply = False
     if bot.user.mentioned_in(message): should_reply = True
-    elif any(word in msg_content for word in ["lol", "lmao", "haha", "dead", "skull", "ahi", "bhai", "yaar"]):
+    elif any(word in msg_content for word in ["samaya", "lol", "lmao", "haha", "dead", "skull", "ahi", "bhai", "yaar"]):
         if random.random() < 0.3: should_reply = True
     elif message.attachments:
         if random.random() < 0.5: should_reply = True
@@ -152,7 +154,8 @@ async def on_message(message):
                 if any(attachment.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp']):
                     image_data = await get_image_from_url(attachment.url)
 
-            clean_text = message.content.replace(f'<@{bot.user.id}>', '').strip()
+            # We replace her name and ID so she reads the message naturally
+            clean_text = message.content.replace(f'<@{bot.user.id}>', 'Samaya').strip()
             response_text = await get_gemini_response(user_id, clean_text, image_data)
 
             wait_time = max(1.0, min(len(response_text) * 0.06, 12.0))
@@ -163,38 +166,27 @@ async def on_message(message):
 
 # --- SLASH COMMAND: HELP ---
 
-@bot.tree.command(name="help", description="Shows the list of cool things I can do.")
+@bot.tree.command(name="help", description="See what Samaya can do.")
 async def help_command(interaction: discord.Interaction):
     """The fancy /help menu."""
     
-    # Create the visual Box (Embed)
     embed = discord.Embed(
-        title="✨ My Chaos Menu",
-        description="Here is everything I can do. Don't wear it out.",
-        color=discord.Color.from_rgb(255, 105, 180) # Hot Pink color
+        title="✨ Samaya's Chaos Menu",
+        description="Here is everything I can do. Don't be annoying about it.",
+        color=discord.Color.from_rgb(255, 105, 180) # Hot Pink
     )
     
-    # Add Fields for each command
-    embed.add_field(name="💬 Chatting", value="Just tag me or say something funny in Hinglish/English. I reply when I feel like it.", inline=False)
-    
-    embed.add_field(name="📸 Vision", value="Upload an image and I'll judge it. (50% chance)", inline=False)
-
+    embed.add_field(name="💬 Chatting", value="Just tag me or say 'Samaya'. I speak English & Hinglish.", inline=False)
+    embed.add_field(name="📸 Vision", value="Upload an image and I'll judge it.", inline=False)
     embed.add_field(name="🔥 !roast @user", value="I will humble them real quick.", inline=True)
-    
     embed.add_field(name="💯 !rate @user", value="I rate their vibe (0-100%).", inline=True)
-    
     embed.add_field(name="❤️ !ship @u1 @u2", value="Toxic love calculator.", inline=True)
-    
     embed.add_field(name="🎱 !ask [question]", value="Sassy 8-Ball answers.", inline=True)
-
     embed.add_field(name="🏷️ !rename @user", value="I give them a funny new nickname.", inline=True)
-    
-    embed.add_field(name="🎲 !truth / !dare", value="I give you a Truth or Dare challenge.", inline=True)
+    embed.add_field(name="🎲 !truth / !dare", value="Truth or Dare challenges.", inline=True)
 
-    # Footer
-    embed.set_footer(text="Developed by @sainnee | Vibe on")
+    embed.set_footer(text="Samaya | Developed by @sainnee")
 
-    # Send the embed
     await interaction.response.send_message(embed=embed)
 
 
