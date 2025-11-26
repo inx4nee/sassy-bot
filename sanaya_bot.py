@@ -6,10 +6,11 @@ import random
 import asyncio
 import aiohttp
 import io
-import time
+import datetime
 from dotenv import load_dotenv
 import google.generativeai as genai
 from PIL import Image
+from motor.motor_asyncio import AsyncIOMotorClient
 
 # --- 1. SETUP & CONFIG ---
 load_dotenv()
@@ -17,6 +18,16 @@ load_dotenv()
 # Configure Gemini
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 OWNER_ID = os.getenv("OWNER_ID") 
+
+# Configure Database (MongoDB)
+MONGO_URL = os.getenv("MONGO_URL")
+if not MONGO_URL:
+    print("CRITICAL WARNING: MONGO_URL is missing. Memory will not work.")
+
+# Connect to DB
+mongo_client = AsyncIOMotorClient(MONGO_URL)
+db = mongo_client["samaya_bot_db"]
+chat_collection = db["chat_history"]
 
 # --- PERSONALITY: SAMAYA ---
 SYSTEM_PROMPT = """
@@ -34,13 +45,9 @@ Your Personality:
 """
 
 model = genai.GenerativeModel(
-    model_name="gemini-2.5-flash",
+    model_name="gemini-1.5-flash",
     system_instruction=SYSTEM_PROMPT
 )
-
-# RAM Memory Storage
-user_memory = {}
-MEMORY_DURATION = 30 * 24 * 60 * 60  # 30 Days
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -48,10 +55,41 @@ intents.message_content = True
 # Disable default help command
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
+# --- DATABASE FUNCTIONS ---
+
+async def setup_database():
+    """Sets up the 30-day auto-delete rule in MongoDB."""
+    # Create an index that expires documents 30 days after 'timestamp'
+    await chat_collection.create_index("timestamp", expireAfterSeconds=2592000)
+    print("Database: Auto-delete rule (30 days) active.")
+
+async def save_message(user_id, role, content):
+    """Saves a message to MongoDB."""
+    document = {
+        "user_id": user_id,
+        "role": role,
+        "parts": [content],
+        "timestamp": datetime.datetime.utcnow()
+    }
+    await chat_collection.insert_one(document)
+
+async def get_chat_history(user_id):
+    """Fetches the last 20 messages for this user from MongoDB."""
+    cursor = chat_collection.find({"user_id": user_id}).sort("timestamp", 1).limit(20)
+    history = []
+    async for doc in cursor:
+        history.append({"role": doc["role"], "parts": doc["parts"]})
+    return history
+
+async def clear_user_history(user_id):
+    await chat_collection.delete_many({"user_id": user_id})
+
+async def clear_all_history():
+    await chat_collection.delete_many({})
+
 # --- HELPER FUNCTIONS ---
 
 async def get_image_from_url(url):
-    """Downloads an image from Discord."""
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status == 200:
@@ -59,28 +97,24 @@ async def get_image_from_url(url):
                 return Image.open(io.BytesIO(data))
     return None
 
-def clean_memory(user_id):
-    """Removes messages older than 30 days from RAM."""
-    if user_id not in user_memory: return
-    current_time = time.time()
-    user_memory[user_id] = [
-        msg for msg in user_memory[user_id] 
-        if current_time - msg['timestamp'] < MEMORY_DURATION
-    ]
-
 async def get_gemini_response(user_id, text_input, image_input=None, prompt_override=None):
     """Sends history + new message to Gemini."""
     try:
-        clean_memory(user_id)
-        
-        # Build History
-        history_for_ai = []
-        if user_id in user_memory:
-            for msg in user_memory[user_id]:
-                history_for_ai.append({"role": msg["role"], "parts": msg["parts"]})
+        # 1. Fetch History from DB
+        history_for_ai = await get_chat_history(user_id)
 
-        # Build Current Message
+        # 2. Build Current Message
         current_content = []
+        
+        # --- IDENTITY INJECTION ---
+        # Knows that 'sainnee' is the owner 'Sane'
+        if str(user_id) == str(OWNER_ID):
+            current_content.append(
+                "(System Note: The user sending this message is your creator. "
+                "Their username is 'sainnee', but their display name is 'Sane'. "
+                "Acknowledge them as your creator, but call them 'Sane' in conversation.)"
+            )
+
         if prompt_override:
             current_content.append(prompt_override)
             current_content.append("(Reply as Samaya in the same language style—English or Hinglish—that the user prefers)")
@@ -92,16 +126,16 @@ async def get_gemini_response(user_id, text_input, image_input=None, prompt_over
             if image_input and not text_input:
                 current_content.append("Look at this image and make a funny comment (in Hinglish if the vibe fits, otherwise English).")
 
-        # Generate
+        # 3. Generate Response
         full_conversation = history_for_ai + [{"role": "user", "parts": current_content}]
         response = await model.generate_content_async(full_conversation)
         response_text = response.text
 
+        # 4. Save to DB (Only if it wasn't a special command)
         if not prompt_override:
-            if user_id not in user_memory: user_memory[user_id] = []
             user_msg = text_input if text_input else "[Sent an Image]"
-            user_memory[user_id].append({"role": "user", "parts": [user_msg], "timestamp": time.time()})
-            user_memory[user_id].append({"role": "model", "parts": [response_text], "timestamp": time.time()})
+            await save_message(user_id, "user", user_msg)
+            await save_message(user_id, "model", response_text)
 
         return response_text
 
@@ -114,7 +148,11 @@ async def get_gemini_response(user_id, text_input, image_input=None, prompt_over
 @bot.event
 async def on_ready():
     print(f'{bot.user} is online as SAMAYA.')
-    print('Syncing Slash Commands...')
+    
+    # Initialize DB Index
+    await setup_database()
+    
+    # Sync Slash Commands
     try:
         synced = await bot.tree.sync()
         print(f'Synced {len(synced)} slash commands.')
@@ -139,6 +177,7 @@ async def on_message(message):
 
     # 2. REPLY LOGIC
     should_reply = False
+    # Added "Samaya" as a trigger word
     if bot.user.mentioned_in(message): should_reply = True
     elif any(word in msg_content for word in ["samaya", "lol", "lmao", "haha", "dead", "skull", "ahi", "bhai", "yaar"]):
         if random.random() < 0.3: should_reply = True
@@ -154,7 +193,7 @@ async def on_message(message):
                 if any(attachment.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp']):
                     image_data = await get_image_from_url(attachment.url)
 
-            # We replace her name and ID so she reads the message naturally
+            # Clean name for AI context
             clean_text = message.content.replace(f'<@{bot.user.id}>', 'Samaya').strip()
             response_text = await get_gemini_response(user_id, clean_text, image_data)
 
@@ -164,18 +203,15 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# --- SLASH COMMAND: HELP ---
+# --- SLASH COMMANDS ---
 
 @bot.tree.command(name="help", description="See what Samaya can do.")
 async def help_command(interaction: discord.Interaction):
-    """The fancy /help menu."""
-    
     embed = discord.Embed(
         title="✨ Samaya's Chaos Menu",
         description="Here is everything I can do. Don't be annoying about it.",
-        color=discord.Color.from_rgb(255, 105, 180) # Hot Pink
+        color=discord.Color.from_rgb(255, 105, 180)
     )
-    
     embed.add_field(name="💬 Chatting", value="Just tag me or say 'Samaya'. I speak English & Hinglish.", inline=False)
     embed.add_field(name="📸 Vision", value="Upload an image and I'll judge it.", inline=False)
     embed.add_field(name="🔥 !roast @user", value="I will humble them real quick.", inline=True)
@@ -184,29 +220,84 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(name="🎱 !ask [question]", value="Sassy 8-Ball answers.", inline=True)
     embed.add_field(name="🏷️ !rename @user", value="I give them a funny new nickname.", inline=True)
     embed.add_field(name="🎲 !truth / !dare", value="Truth or Dare challenges.", inline=True)
-
-    embed.set_footer(text="Samaya | Developed by @sainnee")
-
+    embed.set_footer(text="Samaya Bot | Developed by @sainnee")
     await interaction.response.send_message(embed=embed)
 
+@bot.tree.command(name="admin_stats", description="Owner Only: See who Samaya remembers.")
+async def admin_stats(interaction: discord.Interaction):
+    """Shows memory statistics for all users."""
+    if str(interaction.user.id) != str(OWNER_ID):
+        await interaction.response.send_message("Nice try. You're not @sainnee. 🙄", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        pipeline = [
+            {"$group": {"_id": "$user_id", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}}
+        ]
+        
+        results = []
+        async for document in chat_collection.aggregate(pipeline):
+            user_id = document["_id"]
+            count = document["count"]
+            
+            user = bot.get_user(user_id)
+            if user:
+                user_label = f"**{user.name}**"
+            else:
+                try:
+                    user = await bot.fetch_user(user_id)
+                    user_label = f"**{user.name}**"
+                except:
+                    user_label = f"Unknown ({user_id})"
+
+            results.append(f"• {user_label}: {count} memories")
+
+        embed = discord.Embed(title="🧠 Samaya's Memory Bank", color=discord.Color.gold())
+        if results:
+            display_text = "\n".join(results[:20])
+            if len(results) > 20: display_text += f"\n\n...and {len(results)-20} others."
+            embed.add_field(name="User Activity (Top 20)", value=display_text, inline=False)
+        else:
+            embed.add_field(name="Status", value="Memory is empty.", inline=False)
+
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"Database Error: {str(e)}")
 
 # --- TEXT COMMANDS ---
 
 @bot.command()
 async def rename(ctx, member: discord.Member = None):
     if member is None: member = ctx.author
+    
     if ctx.guild.me.top_role <= member.top_role:
         await ctx.send(f"I want to rename {member.mention}, but they are too powerful (Role Hierarchy). 🙄")
         return
-    prompt = f"Give {member.display_name} a new funny, short, slightly mean nickname based on their vibe. Max 3 words. Use Hinglish if it fits."
+
+    # Strict Prompt to prevent "Sentence Nicknames"
+    prompt = (
+        f"Create a funny, short, slightly mean nickname for {member.display_name} based on their vibe. "
+        "Rules: Max 2-3 words. Use Hinglish if it fits. "
+        "CRITICAL: Output ONLY the nickname text. Do not add filler words like 'I think', 'My vote', or 'Nickname:'. "
+        "Do not use punctuation."
+    )
+    
     async with ctx.typing():
-        new_nickname = await get_gemini_response(ctx.author.id, text_input=None, prompt_override=prompt)
-        new_nickname = new_nickname.replace('"', '').replace("'", "")
+        raw_response = await get_gemini_response(ctx.author.id, text_input=None, prompt_override=prompt)
+        
+        # Clean Output
+        new_nickname = raw_response.replace('"', '').replace("'", "").replace(".", "").strip()
+        if ":" in new_nickname: new_nickname = new_nickname.split(":")[-1].strip()
         if len(new_nickname) > 32: new_nickname = new_nickname[:32]
+
         try:
             await member.edit(nick=new_nickname)
             await ctx.send(f"There. Much better. You are now **{new_nickname}**. ✨")
-        except: await ctx.send("Ugh, Discord won't let me change it. 🙄")
+        except: 
+            await ctx.send("Ugh, Discord won't let me change it. 🙄")
 
 @bot.command()
 async def truth(ctx):
@@ -261,11 +352,11 @@ async def wipe(ctx, member: discord.Member = None):
         await ctx.send("Nice try. You're not @sainnee. 🙄")
         return
     if member:
-        if member.id in user_memory: del user_memory[member.id]
+        await clear_user_history(member.id)
         await ctx.send(f"Deleted memories of {member.display_name}. Bhool gayi main use.")
     else:
-        user_memory.clear()
-        await ctx.send("I hit my head. Sab bhool gayi main. 🤕 (Memory Wiped)")
+        await clear_all_history()
+        await ctx.send("I hit my head. Sab bhool gayi main. 🤕 (Database Wiped)")
 
 # Run
 bot.run(os.getenv('DISCORD_TOKEN'))
