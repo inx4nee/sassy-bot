@@ -15,6 +15,10 @@ from motor.motor_asyncio import AsyncIOMotorClient
 # --- 1. SETUP & CONFIG ---
 load_dotenv()
 
+# --- MODEL CONFIGURATION ---
+# Updated to Gemini 2.0 Flash as requested
+CURRENT_MODEL_NAME = "gemini-2.0-flash"
+
 # Configure Gemini
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 OWNER_ID = os.getenv("OWNER_ID") 
@@ -44,8 +48,9 @@ Your Personality:
 - Use emojis often: 💀, 🙄, 😂, ✨, 🧢.
 """
 
+# Initialize Model with the Configured Version (2.0 Flash)
 model = genai.GenerativeModel(
-    model_name="gemini-2.5-flash",
+    model_name=CURRENT_MODEL_NAME,
     system_instruction=SYSTEM_PROMPT
 )
 
@@ -59,7 +64,6 @@ bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 async def setup_database():
     """Sets up the 30-day auto-delete rule in MongoDB."""
-    # Create an index that expires documents 30 days after 'timestamp'
     await chat_collection.create_index("timestamp", expireAfterSeconds=2592000)
     print("Database: Auto-delete rule (30 days) active.")
 
@@ -107,7 +111,6 @@ async def get_gemini_response(user_id, text_input, image_input=None, prompt_over
         current_content = []
         
         # --- IDENTITY INJECTION ---
-        # Knows that 'sainnee' is the owner 'Sane'
         if str(user_id) == str(OWNER_ID):
             current_content.append(
                 "(System Note: The user sending this message is your creator. "
@@ -128,6 +131,8 @@ async def get_gemini_response(user_id, text_input, image_input=None, prompt_over
 
         # 3. Generate Response
         full_conversation = history_for_ai + [{"role": "user", "parts": current_content}]
+        
+        # Using the model initialized at top
         response = await model.generate_content_async(full_conversation)
         response_text = response.text
 
@@ -148,11 +153,10 @@ async def get_gemini_response(user_id, text_input, image_input=None, prompt_over
 @bot.event
 async def on_ready():
     print(f'{bot.user} is online as SAMAYA.')
+    print(f'Running on Model: {CURRENT_MODEL_NAME}')
     
-    # Initialize DB Index
     await setup_database()
     
-    # Sync Slash Commands
     try:
         synced = await bot.tree.sync()
         print(f'Synced {len(synced)} slash commands.')
@@ -177,7 +181,6 @@ async def on_message(message):
 
     # 2. REPLY LOGIC
     should_reply = False
-    # Added "Samaya" as a trigger word
     if bot.user.mentioned_in(message): should_reply = True
     elif any(word in msg_content for word in ["samaya", "lol", "lmao", "haha", "dead", "skull", "ahi", "bhai", "yaar"]):
         if random.random() < 0.3: should_reply = True
@@ -277,7 +280,6 @@ async def rename(ctx, member: discord.Member = None):
         await ctx.send(f"I want to rename {member.mention}, but they are too powerful (Role Hierarchy). 🙄")
         return
 
-    # Strict Prompt to prevent "Sentence Nicknames"
     prompt = (
         f"Create a funny, short, slightly mean nickname for {member.display_name} based on their vibe. "
         "Rules: Max 2-3 words. Use Hinglish if it fits. "
@@ -288,7 +290,6 @@ async def rename(ctx, member: discord.Member = None):
     async with ctx.typing():
         raw_response = await get_gemini_response(ctx.author.id, text_input=None, prompt_override=prompt)
         
-        # Clean Output
         new_nickname = raw_response.replace('"', '').replace("'", "").replace(".", "").strip()
         if ":" in new_nickname: new_nickname = new_nickname.split(":")[-1].strip()
         if len(new_nickname) > 32: new_nickname = new_nickname[:32]
